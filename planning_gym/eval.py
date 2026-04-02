@@ -12,9 +12,12 @@ from typing import Optional, List, Dict
 import numpy as np
 import torch
 from gymnasium import Env
-from stable_baselines3 import PPO
+from stable_baselines3 import TD3
 
-from .env import PlanningEnv
+try:
+    from .env import PlanningEnv
+except ImportError:  # 兼容直接执行 python planning_gym/eval.py
+    from env import PlanningEnv
 
 
 class PlanningGymWrapper(Env):
@@ -62,7 +65,7 @@ def evaluate(
 ):
     """评估模型"""
     print(f"Loading model from {model_path}")
-    model = PPO.load(model_path)
+    model = TD3.load(model_path)
 
     render_mode = "human" if render else None
     env = PlanningGymWrapper(env_yaml=env_yaml, render_mode=render_mode)
@@ -151,7 +154,7 @@ def visualize_policy(
     """
     import irsim
 
-    model = PPO.load(model_path)
+    model = TD3.load(model_path)
 
     env_path = Path(__file__).parent.parent / env_yaml
     env = irsim.make(str(env_path), display=True, save_ani=save_animation)

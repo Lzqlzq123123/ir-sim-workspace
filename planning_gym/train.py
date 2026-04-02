@@ -1,5 +1,5 @@
 """
-规划型自动驾驶PPO训练脚本
+规划型自动驾驶TD3训练脚本
 """
 
 import os
@@ -11,17 +11,21 @@ from typing import Optional
 import numpy as np
 import torch
 from gymnasium import Env
-from stable_baselines3 import PPO
+from stable_baselines3 import TD3
 from stable_baselines3.common.callbacks import (
     CheckpointCallback,
     EvalCallback,
     CallbackList,
 )
+from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.logger import configure
 
-from .env import PlanningEnv
+try:
+    from .env import PlanningEnv
+except ImportError:  # 兼容直接执行 python planning_gym/train.py
+    from env import PlanningEnv
 
 
 class PlanningGymWrapper(Env):
@@ -75,7 +79,7 @@ def train(args):
 
     # 创建保存目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = Path(args.save_dir) / f"planning_ppo_{timestamp}"
+    save_dir = Path(args.save_dir) / f"planning_td3_{timestamp}"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     log_dir = save_dir / "logs"
@@ -96,20 +100,29 @@ def train(args):
     # 配置日志
     logger = configure(str(log_dir), ["stdout", "tensorboard"])
 
-    # 创建PPO模型
-    model = PPO(
+    sample_env = env.envs[0] if hasattr(env, "envs") else env
+    action_dim = int(np.prod(sample_env.action_space.shape))
+    action_noise = NormalActionNoise(
+        mean=np.zeros(action_dim, dtype=np.float32),
+        sigma=np.ones(action_dim, dtype=np.float32) * args.action_noise_std,
+    )
+
+    # 创建TD3模型
+    model = TD3(
         "MlpPolicy",
         env,
         learning_rate=args.learning_rate,
-        n_steps=args.n_steps,
         batch_size=args.batch_size,
-        n_epochs=args.n_epochs,
+        buffer_size=args.buffer_size,
+        learning_starts=args.learning_starts,
+        train_freq=(args.train_freq, "step"),
+        gradient_steps=args.gradient_steps,
         gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        clip_range=args.clip_range,
-        ent_coef=args.ent_coef,
-        vf_coef=args.vf_coef,
-        max_grad_norm=args.max_grad_norm,
+        tau=args.tau,
+        policy_delay=args.policy_delay,
+        target_policy_noise=args.target_policy_noise,
+        target_noise_clip=args.target_noise_clip,
+        action_noise=action_noise,
         verbose=1,
         tensorboard_log=str(log_dir),
         seed=args.seed,
@@ -124,7 +137,7 @@ def train(args):
     checkpoint_callback = CheckpointCallback(
         save_freq=args.save_freq,
         save_path=str(save_dir / "checkpoints"),
-        name_prefix="planning_ppo",
+        name_prefix="planning_td3",
     )
     callbacks.append(checkpoint_callback)
 
@@ -165,23 +178,25 @@ def train(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train planning-based autonomous driving with PPO")
+    parser = argparse.ArgumentParser(description="Train planning-based autonomous driving with TD3")
 
     # 环境参数
     parser.add_argument("--env-yaml", type=str, default="env.yaml", help="Environment YAML file")
     parser.add_argument("--n-envs", type=int, default=4, help="Number of parallel environments")
 
-    # PPO超参数
+    # TD3超参数
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--n-steps", type=int, default=2048, help="Number of steps per update")
-    parser.add_argument("--batch-size", type=int, default=64, help="Minibatch size")
-    parser.add_argument("--n-epochs", type=int, default=10, help="Number of epochs per update")
+    parser.add_argument("--batch-size", type=int, default=256, help="Minibatch size")
+    parser.add_argument("--buffer-size", type=int, default=1_000_000, help="Replay buffer size")
+    parser.add_argument("--learning-starts", type=int, default=10_000, help="Random exploration steps before learning")
+    parser.add_argument("--train-freq", type=int, default=1, help="Train once every N env steps")
+    parser.add_argument("--gradient-steps", type=int, default=1, help="Gradient steps per update")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
-    parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda")
-    parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
-    parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient")
-    parser.add_argument("--vf-coef", type=float, default=0.5, help="Value function coefficient")
-    parser.add_argument("--max-grad-norm", type=float, default=0.5, help="Max gradient norm")
+    parser.add_argument("--tau", type=float, default=0.005, help="Soft update coefficient")
+    parser.add_argument("--policy-delay", type=int, default=2, help="Delayed actor update frequency")
+    parser.add_argument("--action-noise-std", type=float, default=0.1, help="Std of Gaussian exploration noise")
+    parser.add_argument("--target-policy-noise", type=float, default=0.2, help="Target policy smoothing noise")
+    parser.add_argument("--target-noise-clip", type=float, default=0.5, help="Target policy noise clip")
 
     # 训练参数
     parser.add_argument("--total-timesteps", type=int, default=1_000_000, help="Total timesteps")

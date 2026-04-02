@@ -26,17 +26,19 @@ class PlanningConfig:
     goal_reward: float = 100.0
     step_reward: float = 0.1
 
-    # PPO参数
+    # TD3参数
     learning_rate: float = 3e-4
-    n_steps: int = 2048
-    batch_size: int = 64
-    n_epochs: int = 10
+    batch_size: int = 256
+    buffer_size: int = 1_000_000
+    learning_starts: int = 10_000
+    train_freq: int = 1
+    gradient_steps: int = 1
     gamma: float = 0.99
-    gae_lambda: float = 0.95
-    clip_range: float = 0.2
-    ent_coef: float = 0.01
-    vf_coef: float = 0.5
-    max_grad_norm: float = 0.5
+    tau: float = 0.005
+    policy_delay: int = 2
+    action_noise_std: float = 0.1
+    target_policy_noise: float = 0.2
+    target_noise_clip: float = 0.5
 
     # 训练参数
     total_timesteps: int = 1_000_000

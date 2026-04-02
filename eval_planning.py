@@ -3,8 +3,8 @@
 规划型自动驾驶评估脚本
 
 使用方法:
-  python eval_planning.py --model-path ./logs/planning_ppo_xxx/final_model.zip
-  python eval_planning.py --model-path ./logs/planning_ppo_xxx/final_model.zip --visualize
+  python eval_planning.py --model-path ./logs/planning_td3_xxx/final_model.zip
+  python eval_planning.py --model-path ./logs/planning_td3_xxx/final_model.zip --visualize
 """
 
 import os
@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Optional
 
 from gymnasium import Env
-from stable_baselines3 import PPO
+from stable_baselines3 import TD3
 
 from planning_gym.env import (
     PlanningEnv,
@@ -108,7 +108,7 @@ def evaluate(
 ):
     """评估模型"""
     print(f"Loading model from {model_path}")
-    model = PPO.load(model_path)
+    model = TD3.load(model_path)
 
     render_mode = "human" if render else None
     env = PlanningGymWrapper(env_yaml=env_yaml, render_mode=render_mode, forward_only=forward_only)
@@ -199,7 +199,7 @@ def visualize_policy(
     - 红色实线: 局部路径（当前参考轨迹段，用于计算偏差）
     - 绿色虚线: 规划轨迹（模型预测的未来轨迹）
     """
-    model = PPO.load(model_path)
+    model = TD3.load(model_path)
     env_config = load_env_config(env_yaml)
 
     # 从模型路径提取名称

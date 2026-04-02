@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-规划型自动驾驶训练脚本
+规划型自动驾驶训练脚本（TD3）
 
 支持实时可视化：训练时每一步都显示车辆运动和规划轨迹
 
@@ -27,22 +27,24 @@ if os.path.exists(_ir_sim_path):
 import argparse
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="规划型自动驾驶PPO训练")
+    parser = argparse.ArgumentParser(description="规划型自动驾驶TD3训练")
     parser.add_argument("--visualize", action="store_true", help="实时可视化训练过程")
     parser.add_argument("--render-delay", type=float, default=0.01, help="渲染帧间隔(秒)")
     parser.add_argument("--forward-only", action="store_true", default=True, help="只允许车辆前进（默认开启）")
     parser.add_argument("--no-forward-only", action="store_true", help="允许车辆后退")
     parser.add_argument("--env-yaml", type=str, default="env.yaml")
     parser.add_argument("--learning-rate", type=float, default=3e-4)
-    parser.add_argument("--n-steps", type=int, default=2048)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--n-epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--buffer-size", type=int, default=1_000_000, help="经验回放池大小")
+    parser.add_argument("--learning-starts", type=int, default=10_000, help="开始更新前的随机探索步数")
+    parser.add_argument("--train-freq", type=int, default=1, help="每隔多少步做一次TD3更新")
+    parser.add_argument("--gradient-steps", type=int, default=1, help="每次更新执行多少次梯度下降")
     parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--clip-range", type=float, default=0.2)
-    parser.add_argument("--ent-coef", type=float, default=0.01)
-    parser.add_argument("--vf-coef", type=float, default=0.5)
-    parser.add_argument("--max-grad-norm", type=float, default=0.5)
+    parser.add_argument("--tau", type=float, default=0.005, help="目标网络软更新系数")
+    parser.add_argument("--policy-delay", type=int, default=2, help="Actor延迟更新频率")
+    parser.add_argument("--action-noise-std", type=float, default=0.1, help="动作探索高斯噪声标准差")
+    parser.add_argument("--target-policy-noise", type=float, default=0.2, help="目标策略平滑噪声")
+    parser.add_argument("--target-noise-clip", type=float, default=0.5, help="目标策略噪声裁剪范围")
     parser.add_argument("--total-timesteps", type=int, default=1_000_000)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, default="auto")
@@ -73,8 +75,9 @@ from datetime import datetime
 from pathlib import Path
 
 from gymnasium import Env, spaces
-from stable_baselines3 import PPO
+from stable_baselines3 import TD3
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
+from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.logger import configure
@@ -441,7 +444,7 @@ def main():
         np.random.seed(args.seed)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = Path(args.save_dir) / f"planning_ppo_{timestamp}"
+    save_dir = Path(args.save_dir) / f"planning_td3_{timestamp}"
     save_dir.mkdir(parents=True, exist_ok=True)
     log_dir = save_dir / "logs"
     log_dir.mkdir(exist_ok=True)
@@ -472,18 +475,27 @@ def main():
 
     logger = configure(str(log_dir), ["stdout", "tensorboard"])
 
-    model = PPO(
+    sample_env = env.envs[0] if hasattr(env, "envs") else env
+    action_dim = int(np.prod(sample_env.action_space.shape))
+    action_noise = NormalActionNoise(
+        mean=np.zeros(action_dim, dtype=np.float32),
+        sigma=np.ones(action_dim, dtype=np.float32) * args.action_noise_std,
+    )
+
+    model = TD3(
         "MlpPolicy", env,
         learning_rate=args.learning_rate,
-        n_steps=args.n_steps,
         batch_size=args.batch_size,
-        n_epochs=args.n_epochs,
+        buffer_size=args.buffer_size,
+        learning_starts=args.learning_starts,
+        train_freq=(args.train_freq, "step"),
+        gradient_steps=args.gradient_steps,
         gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        clip_range=args.clip_range,
-        ent_coef=args.ent_coef,
-        vf_coef=args.vf_coef,
-        max_grad_norm=args.max_grad_norm,
+        tau=args.tau,
+        policy_delay=args.policy_delay,
+        target_policy_noise=args.target_policy_noise,
+        target_noise_clip=args.target_noise_clip,
+        action_noise=action_noise,
         verbose=1,
         tensorboard_log=str(log_dir),
         seed=args.seed,
@@ -492,7 +504,7 @@ def main():
     model.set_logger(logger)
 
     callbacks = [
-        CheckpointCallback(args.save_freq, str(save_dir / "checkpoints"), "planning_ppo"),
+        CheckpointCallback(args.save_freq, str(save_dir / "checkpoints"), "planning_td3"),
         DetailedMetricsCallback(),  # 添加成功率、碰撞率跟踪
     ]
 
@@ -503,13 +515,14 @@ def main():
     #                         log_path=str(save_dir / "eval_logs"), eval_freq=args.eval_freq,
     #                         n_eval_episodes=args.n_eval_episodes, deterministic=True))
 
-    print(f"\n{'='*60}\n规划型自动驾驶训练\n{'='*60}")
+    print(f"\n{'='*60}\n规划型自动驾驶TD3训练\n{'='*60}")
     print(f"开始时间: {timestamp}")
     print(f"保存目录: {save_dir}")
     print(f"总步数: {args.total_timesteps}")
     print(f"实时可视化: {'启用' if args.visualize else '禁用'}")
     print(f"并行环境数: {args.n_envs}")
     print(f"只允许前进: {'启用' if args.forward_only else '禁用'}")
+    print("算法: TD3")
     print(f"动作空间: [加速度, 转角] (归一化到[-1,1])")
     print(f"{'='*60}\n")
 

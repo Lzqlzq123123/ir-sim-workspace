@@ -1,6 +1,6 @@
 # NeuPAN 自动驾驶训练环境
 
-本工作空间包含两种自动驾驶模型训练方法，使用 Stable Baselines3 的 PPO 算法进行训练。
+本工作空间使用 Stable Baselines3 的 TD3 算法进行规划型自动驾驶训练。
 
 ---
 
@@ -284,10 +284,10 @@ python train_control.py --total-timesteps 1000000 --no-forward-only
 MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000
 
 # 多进程并行训练（推荐，速度约 3x）
-MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --n-envs 4 --n-steps 512 --batch-size 128
+MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --n-envs 4 --batch-size 256 --learning-starts 10000
 
 # 更多并行（CPU核数足够时）
-MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --n-envs 8 --n-steps 512 --batch-size 256
+MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --n-envs 8 --batch-size 256 --buffer-size 1000000
 
 # 带实时可视化训练（单环境）
 python train_planning.py --total-timesteps 1000000 --visualize
@@ -366,10 +366,15 @@ MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --no-forward-o
 |------|--------|------|
 | `--total-timesteps` | 1000000 | 总训练步数 |
 | `--learning-rate` | 3e-4 | 学习率 |
-| `--n-steps` | 2048 | 每次更新的步数 |
-| `--batch-size` | 64 | 批次大小 |
-| `--n-epochs` | 10 | 训练轮数 |
+| `--batch-size` | 256 | 批次大小 |
+| `--buffer-size` | 1000000 | 经验回放池大小 |
+| `--learning-starts` | 10000 | 开始训练前的随机探索步数 |
+| `--train-freq` | 1 | 每隔多少步做一次更新 |
+| `--gradient-steps` | 1 | 每次更新执行的梯度步数 |
 | `--gamma` | 0.99 | 折扣因子 |
+| `--tau` | 0.005 | 目标网络软更新系数 |
+| `--policy-delay` | 2 | Actor 延迟更新频率 |
+| `--action-noise-std` | 0.1 | 探索噪声标准差 |
 | `--device` | auto | 设备 (auto/cpu/cuda) |
 | `--save-dir` | ./logs | 保存目录 |
 | `--eval-freq` | 5000 | 评估频率 |
@@ -397,7 +402,7 @@ MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --no-forward-o
 python eval_control.py --model-path ./logs/control_ppo_xxx/final_model.zip --visualize
 
 # 规划型评估
-python eval_planning.py --model-path ./logs/planning_ppo_xxx/final_model.zip --visualize
+python eval_planning.py --model-path ./logs/planning_td3_xxx/final_model.zip --visualize
 ```
 
 ---
