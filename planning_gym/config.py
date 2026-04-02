@@ -19,7 +19,7 @@ class PlanningConfig:
     # MPC参数
     horizon: int = 10
     trajectory_dim: int = 5
-    wheelbase: float = 1.75
+    wheelbase: float = 3.0
 
     # 奖励参数
     collision_penalty: float = -100.0

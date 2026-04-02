@@ -49,11 +49,6 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 
-try:
-    import yaml
-except Exception:
-    yaml = None
-
 from gymnasium import Env
 from stable_baselines3 import PPO
 
@@ -61,8 +56,8 @@ from planning_gym.env import (
     PlanningEnv,
     VehicleKinematics,
     MPCTracker,
-    load_lidar_config_from_yaml,
-    load_robot_shape_config_from_yaml,
+    load_env_config,
+    resolve_env_yaml_path,
 )
 import irsim
 
@@ -205,6 +200,7 @@ def visualize_policy(
     - 绿色虚线: 规划轨迹（模型预测的未来轨迹）
     """
     model = PPO.load(model_path)
+    env_config = load_env_config(env_yaml)
 
     # 从模型路径提取名称
     model_name = Path(model_path).stem  # 获取文件名（不含扩展名）
@@ -212,127 +208,53 @@ def visualize_policy(
         # 如果是final_model，使用父文件夹名称
         model_name = Path(model_path).parent.name
 
-    # ir-sim会将ani_name拼接到自身animation目录下，这里只传文件名，避免绝对路径报错
-    gif_name = model_name
+    # GIF保存路径：脚本所在目录/gifs/
+    script_dir = Path(__file__).parent
+    gif_dir = script_dir / "gifs"
+    gif_dir.mkdir(exist_ok=True)
+    gif_path = str(gif_dir / model_name)  # 不含.gif扩展名
 
     # 使用irsim.make创建带显示的环境，支持保存GIF
-    env_path = Path(__file__).parent / env_yaml
+    env_path = resolve_env_yaml_path(env_yaml)
     viz_env = irsim.make(str(env_path), display=True, save_ani=save_gif, log_level="WARNING")
 
     # 运动学模型参数
-    v_max = 3.0
-    delta_max = 1.0
+    v_max = env_config["v_max"]
+    delta_max = env_config["delta_max"]
     a_max = 3.0
-    horizon = 10
-    shape_cfg = load_robot_shape_config_from_yaml(env_yaml)
-    wheelbase = float(shape_cfg.get("wheelbase", 1.75))
+    horizon = env_config["planning_horizon"]
+    wheelbase = env_config["wheelbase"]
+    dt = env_config["step_time"]
+
+    v_min = 0.0 if forward_only else -v_max
 
     kinematics = VehicleKinematics(
-        wheelbase=wheelbase, dt=0.1, v_min=0.0, v_max=v_max, delta_max=delta_max
+        wheelbase=wheelbase, dt=dt, v_min=v_min, v_max=v_max, delta_max=delta_max, a_max=a_max
     )
 
     # MPC跟踪器（与训练时一致）
     mpc = MPCTracker(
-        horizon=horizon, dt=0.1, wheelbase=wheelbase, v_min=0.0, v_max=v_max, delta_max=delta_max
+        horizon=horizon, dt=dt, wheelbase=wheelbase, v_min=v_min, v_max=v_max, delta_max=delta_max
     )
 
-    # 从env.yaml读取CSV全局路径并对齐机器人起终点（与训练保持一致）
-    def _load_global_path_config(env_yaml_path: Path):
-        if yaml is None or not env_yaml_path.exists():
-            return {}
-        try:
-            with open(env_yaml_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            gui_cfg = data.get("gui", {}) if isinstance(data, dict) else {}
-            cfg = gui_cfg.get("global_path", {}) if isinstance(gui_cfg, dict) else {}
-            return cfg if isinstance(cfg, dict) else {}
-        except Exception:
-            return {}
-
-    def _load_global_path_from_csv(cfg: dict, env_yaml_path: Path):
-        csv_path = cfg.get("csv_path", "")
-        if not csv_path:
-            return None
-
-        csv_file = Path(str(csv_path))
-        if not csv_file.is_absolute():
-            csv_file = (env_yaml_path.parent / csv_file).resolve()
-        if not csv_file.exists():
-            return None
-
-        delimiter = str(cfg.get("delimiter", ","))
-        x_col = str(cfg.get("x_col", "x"))
-        y_col = str(cfg.get("y_col", "y"))
-        yaw_col = str(cfg.get("yaw_col", "yaw"))
-        speed_col = str(cfg.get("speed_col", "speed"))
-
-        try:
-            data = np.genfromtxt(
-                str(csv_file), delimiter=delimiter, names=True, dtype=None, encoding="utf-8"
-            )
-        except Exception:
-            return None
-
-        if data is None or getattr(data, "dtype", None) is None or data.dtype.names is None:
-            return None
-
-        if data.ndim == 0:
-            data = np.array([data], dtype=data.dtype)
-
-        names = set(data.dtype.names)
-        if x_col not in names or y_col not in names:
-            return None
-
-        x = np.asarray(data[x_col], dtype=float)
-        y = np.asarray(data[y_col], dtype=float)
-        if x.size < 2:
-            return None
-
-        if yaw_col in names:
-            yaw = np.asarray(data[yaw_col], dtype=float)
-        else:
-            dx = np.gradient(x)
-            dy = np.gradient(y)
-            yaw = np.arctan2(dy, dx)
-
-        if speed_col in names:
-            v = np.asarray(data[speed_col], dtype=float)
-        else:
-            v = np.ones_like(x) * 3.0
-
-        n = min(x.size, y.size, yaw.size, v.size)
-        path = np.zeros((n, 4), dtype=float)
-        path[:, 0] = x[:n]
-        path[:, 1] = y[:n]
-        path[:, 2] = yaw[:n]
-        path[:, 3] = v[:n]
-        return path
-
-    gp_cfg = _load_global_path_config(env_path)
-    global_path = _load_global_path_from_csv(gp_cfg, env_path)
-    if global_path is None or len(global_path) < 2:
-        raise ValueError("global_path CSV 无效，请检查 env.yaml 的 gui.global_path.csv_path 和列名配置")
-
+    # 获取目标位置和生成全局路径
     robot = viz_env.robot
-    start = global_path[0]
-    end = global_path[-1]
-    aligned_state = robot.state.copy()
-    aligned_state[0, 0] = float(start[0])
-    aligned_state[1, 0] = float(start[1])
-    aligned_state[2, 0] = float(start[2])
-    if aligned_state.shape[0] > 3:
-        aligned_state[3, 0] = 0.0
-    robot.set_state(aligned_state, init=True)
-    if robot.velocity is not None:
-        robot.set_velocity(np.zeros_like(robot.velocity), init=True)
-    robot.set_goal([float(end[0]), float(end[1]), float(end[2])], init=True)
-    viz_env.build_tree()
+    start_position = robot.state[:2].flatten().copy()
+    goal_position = robot.goal[:2].flatten() if robot.goal is not None else np.array([50.0, 25.0])
+
+    # 生成全局路径
+    num_points = 100
+    t = np.linspace(0, 1, num_points)
+    global_path = np.zeros((num_points, 4))
+    global_path[:, 0] = start_position[0] + t * (goal_position[0] - start_position[0])
+    global_path[:, 1] = start_position[1] + t * (goal_position[1] - start_position[1])
+    global_path[:, 2] = np.arctan2(goal_position[1] - start_position[1], goal_position[0] - start_position[0])
+    global_path[:, 3] = env_config["target_velocity"]
 
     # 手动构建观测（不使用PlanningEnv，避免matplotlib后端问题）
-    lidar_cfg = load_lidar_config_from_yaml(env_yaml)
-    lidar_points = int(lidar_cfg.get("number", 100))
-    lidar_range_max = float(lidar_cfg.get("range_max", 10.0))
-    target_velocity = 3.0
+    lidar_points = env_config["lidar_points"]
+    lidar_range_max = env_config["lidar_range_max"]
+    target_velocity = env_config["target_velocity"]
     local_path_length = 20
 
     def get_observation():
@@ -374,7 +296,7 @@ def visualize_policy(
             [v / max(target_velocity, 0.1)],
             [delta_theta / np.pi],
             [np.clip(delta_y / 5.0, -1, 1)],
-            [np.clip(delta / 1.0, -1, 1)],
+            [np.clip(delta / max(delta_max, 1e-6), -1, 1)],
             lidar_normalized
         ])
         return obs.astype(np.float32), closest_idx
@@ -426,7 +348,7 @@ def visualize_policy(
 
         # 使用MPC跟踪轨迹（与训练时一致）
         control = mpc.compute_control(current_state, planned_trajectory)
-        control[0] = np.clip(control[0], 0.0, v_max)
+        control[0] = np.clip(control[0], 0.0 if forward_only else -v_max, v_max)
         control[1] = np.clip(control[1], -delta_max, delta_max)
 
         viz_env.step(control)
@@ -446,8 +368,8 @@ def visualize_policy(
 
     # 保存GIF
     if save_gif:
-        viz_env.end(ending_time=1, ani_name=gif_name)
-        print(f"GIF saved as {gif_name}.gif (in ir-sim/animation)")
+        viz_env.end(ending_time=1, ani_name=gif_path)
+        print(f"GIF saved as {gif_path}.gif")
     else:
         viz_env.end(ending_time=1)
 

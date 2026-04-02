@@ -8,9 +8,8 @@
 
 ### 依赖
 
+- Python >= 3.10
 - [uv](https://github.com/astral-sh/uv)（包管理工具）
-- 训练/离线评估：推荐 Python 3.11
-- ROS2 Foxy 实车部署：推荐 Python 3.8
 
 ### 安装步骤
 
@@ -24,17 +23,13 @@ pip install uv
 
 ```bash
 cd /path/to/model_train/workspace
-# 训练/离线评估
-source .venv311/bin/activate
-
-# 如果目标是 Ubuntu20.04 + ROS2 Foxy 实车部署，请改用
-# uv venv .venv38 --python 3.8
+uv venv .venv --python 3.11
 ```
 
 **3. 激活虚拟环境**
 
 ```bash
-source .venv(版本号)/bin/activate
+source .venv/bin/activate
 ```
 
 **4. 安装依赖**
@@ -43,7 +38,7 @@ source .venv(版本号)/bin/activate
 uv pip install numpy torch gymnasium stable-baselines3 tensorboard tqdm rich scipy matplotlib
 ```
 
-**5. 安装仿真环境 ir-sim（本地安装，实车部署3.8版本不用安装）**
+**5. 安装仿真环境 ir-sim（本地可编辑安装）**
 
 ```bash
 uv pip install -e ../ir-sim
@@ -55,14 +50,12 @@ uv pip install -e ../ir-sim
 python -c "import irsim; import stable_baselines3; import torch; print('OK')"
 ```
 
-> **注意 1**：如果可视化报 TkAgg 错误，说明 uv 管理的 Python 不含 Tk，执行以下命令修复：
+> **注意**：如果可视化报 TkAgg 错误，说明 uv 管理的 Python 不含 Tk，执行以下命令修复：
 > ```bash
 > pip install --upgrade uv
 > uv python upgrade --reinstall
 > # 然后重新执行步骤 2~5
 > ```
->
-> **注意 2**：如果要在 ROS2 Foxy 上跑 `rclpy` 与自定义 msg，uv 虚拟环境的 Python 版本必须和车端 ROS2 Python ABI 一致。默认二进制 Foxy 通常对应 Python 3.8，因此部署建议直接使用 `uv venv .venv --python 3.8`。
 
 ---
 
@@ -192,7 +185,16 @@ reward += +100.0    # 到达终点
 
 ## 环境要求
 
-统一使用 uv 虚拟环境，不再依赖 conda。
+```bash
+# 使用conda环境
+conda activate py310
+
+# 安装依赖
+pip install stable-baselines3 gymnasium numpy scipy shapely pyyaml imageio loguru tqdm rich
+
+# 可视化需要交互式后端
+pip install tk  # 或 PyQt5
+```
 
 ---
 
@@ -212,107 +214,6 @@ MPLBACKEND=Agg python train_planning.py --total-timesteps 100000
 python train_control.py --total-timesteps 100000 --visualize
 python train_planning.py --total-timesteps 100000 --visualize
 ```
-
----
-
-## ROS2 Foxy 实车部署（workspace + uv）
-
-下面这套流程是给 `realcar_deploy/planning_ppo_local_planner.py` 用的，目标是：
-
-- 输入：实车 `/rslidar_points`、里程计、底盘反馈、任务点
-- 输出：`/planning/local_trajectory`
-- 不接管 MPC 控制，只负责给下游 MPC 提供可跟踪轨迹
-
-### 1. 建议使用单独的 uv 部署环境
-
-```bash
-cd /data/lzq/model_train/workspace
-rm -rf .venv
-uv venv .venv --python 3.8
-source .venv/bin/activate
-uv pip install numpy torch gymnasium stable-baselines3 tensorboard tqdm rich scipy matplotlib
-```
-
-### 2. 让 uv 环境能看到 ROS2 与自定义消息
-
-```bash
-source /opt/ros/foxy/setup.bash
-
-# 在实车代码工作空间编译自定义消息（至少要包含 planning/decision/wirecontrol 等）
-cd /data/lzq/Cotton_Agv
-colcon build --packages-up-to \
-  planning_msgs decision_msgs wirecontrol_msgs control_msgs \
-  location_msgs perception_msgs v2n_msgs
-
-source /data/lzq/Cotton_Agv/install/setup.bash
-```
-
-### 3. 启动 planning PPO 部署节点
-
-```bash
-cd /data/lzq/model_train/workspace
-source .venv/bin/activate
-source /opt/ros/foxy/setup.bash
-source /data/lzq/Cotton_Agv/install/setup.bash
-
-python realcar_deploy/planning_ppo_local_planner.py \
-  --ros-args \
-  --params-file realcar_deploy/planning_ppo_local_planner.params.yaml \
-  -p model_path:=/data/lzq/model_train/workspace/logs/planning_ppo_20260326_223546/final_model.zip
-```
-
-### 3.1 标准 ROS2 package / launch 方式（推荐上车）
-
-`workspace/realcar_deploy` 已整理成标准 `ament_python` ROS2 package。
-
-```bash
-cd /data/lzq/model_train/workspace
-source .venv/bin/activate
-source /opt/ros/foxy/setup.bash
-source /data/lzq/Cotton_Agv/install/setup.bash
-
-colcon build --packages-select realcar_deploy --symlink-install
-source /data/lzq/model_train/workspace/install/setup.bash
-
-ros2 launch realcar_deploy planning_ppo_local_planner.launch.py \
-  model_path:=/data/lzq/model_train/workspace/logs/planning_ppo_20260326_223546/final_model.zip
-```
-
-如果参数文件需要替换：
-
-```bash
-ros2 launch realcar_deploy planning_ppo_local_planner.launch.py \
-  model_path:=/data/lzq/model_train/workspace/logs/planning_ppo_20260326_223546/final_model.zip \
-  params_file:=/data/lzq/model_train/workspace/realcar_deploy/planning_ppo_local_planner.params.yaml
-```
-
-### 4. 回放 rosbag
-
-```bash
-source /opt/ros/foxy/setup.bash
-source /data/lzq/Cotton_Agv/install/setup.bash
-
-ros2 bag play /data/lzq/Cotton_Agv/rosbag/rosbag2_2026_03_27-15_39_43
-```
-
-### 5. 关键接口
-
-- 输入点云：`/rslidar_points`
-- 输入底盘：`/chassis/car_ori_data`
-- 输入定位：`/location/fusion_location`
-- 输入任务：`/decision/task`
-- 备用目标：`/goal_pose`
-- 输出轨迹：`/planning/local_trajectory`
-- 调试轨迹：`/planning/ppo_debug_path`
-
-### 6. 当前部署节点逻辑
-
-- 观测维度与 `eval_planning.py` 对齐：`4 + 100 = 104`
-- PPO 输出语义：`[加速度, 转向角]`
-- 用阿克曼模型前向积分出短时局部轨迹
-- 发布 `planning_msgs/LocalTrajectoryPoints`
-- 轨迹坐标系：`map`
-- 雷达输入：直接使用真实 `/rslidar_points`，先按实车 perception 外参转到 vehicle 风格坐标系，再按 `z ∈ [-0.3, 2.0]` 过滤并投影为 2D
 
 ---
 

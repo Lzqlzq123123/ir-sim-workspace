@@ -72,11 +72,6 @@ import numpy as np
 from datetime import datetime
 from pathlib import Path
 
-try:
-    import yaml
-except Exception:
-    yaml = None
-
 from gymnasium import Env, spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback, CallbackList
@@ -89,6 +84,7 @@ from callbacks import DetailedMetricsCallback
 
 # 现在才导入irsim，此时后端已经设置好
 import irsim
+from planning_gym.env import VehicleKinematics, MPCTracker, load_env_config, resolve_env_yaml_path
 
 
 class VisualizedPlanningWrapper(Env):
@@ -104,55 +100,40 @@ class VisualizedPlanningWrapper(Env):
 
     def __init__(self, env_yaml="env.yaml", render_delay=0.01, forward_only=True):
         super().__init__()
-        from planning_gym.env import (
-            VehicleKinematics,
-            MPCTracker,
-            load_lidar_config_from_yaml,
-            load_obstacle_avoidance_config_from_yaml,
-            load_robot_shape_config_from_yaml,
-        )
 
         self.render_delay = render_delay
         self.env_yaml = env_yaml
         self.forward_only = forward_only
+        self.env_config = load_env_config(env_yaml)
+        self.env_path = resolve_env_yaml_path(env_yaml)
 
         # 创建ir-sim可视化环境
-        env_path = os.path.join(os.path.dirname(__file__), env_yaml)
-        self.viz_env = irsim.make(env_path, display=True, log_level="WARNING")
+        self.viz_env = irsim.make(str(self.env_path), display=True, log_level="WARNING")
 
-        # 从env.yaml读取配置（与env.yaml保持一致）
-        self.target_velocity = 3.0  # 与env.yaml中的vel_max一致
+        # 从env.yaml读取配置
+        self.target_velocity = self.env_config["target_velocity"]
         self.max_steps = 1000
-        lidar_cfg = load_lidar_config_from_yaml(env_yaml)
-        self.lidar_points = int(lidar_cfg.get("number", 100))
-        self.lidar_range_max = float(lidar_cfg.get("range_max", 10.0))
-        obstacle_cfg = load_obstacle_avoidance_config_from_yaml(env_yaml)
-        self.obstacle_min_distance = float(obstacle_cfg.get("min_distance", 3.0))
-        self.obstacle_danger_distance = float(obstacle_cfg.get("danger_distance", 1.0))
-        self.horizon = 10
-        shape_cfg = load_robot_shape_config_from_yaml(env_yaml)
-        self.wheelbase = float(shape_cfg.get("wheelbase", 1.75))
-        self.v_max = 3.0  # 与env.yaml中的vel_max一致
-        self.delta_max = 1.0  # 与env.yaml中的vel_max[1]一致
-        self._global_path_cfg = self._load_global_path_config(env_yaml)
-        random_cfg = self._load_randomization_config(env_yaml)
-        self.randomize_every_reset = bool(random_cfg.get("enabled", False))
-        self.min_start_goal_distance = float(random_cfg.get("min_start_goal_distance", 10.0))
-        self.random_margin = float(random_cfg.get("random_margin", 1.5))
-        self.randomize_obstacles = bool(random_cfg.get("randomize_obstacles", True))
-        self.max_randomization_attempts = int(random_cfg.get("max_sampling_attempts", 200))
-        self._random_obstacle_ids = [
-            obs.id for obs in self.viz_env.obstacle_list if getattr(obs, "shape", "") == "circle"
-        ]
+        self.lidar_points = self.env_config["lidar_points"]
+        self.lidar_range_max = self.env_config["lidar_range_max"]
+        self.horizon = self.env_config["planning_horizon"]
+        self.dt = self.env_config["step_time"]
+        self.a_max = 3.0
+        self.wheelbase = self.env_config["wheelbase"]
+        self.vehicle_length = self.env_config["vehicle_length"]
+        self.vehicle_width = self.env_config["vehicle_width"]
+        self.v_max = self.env_config["v_max"]
+        self.delta_max = self.env_config["delta_max"]
+        self.obstacle_penalty_distance = self.env_config["obstacle_penalty_distance"]
+        self.obstacle_danger_distance = self.env_config["obstacle_danger_distance"]
 
         # 运动学模型和MPC跟踪器
         # 根据forward_only设置速度范围
         v_min = 0.0 if forward_only else -self.v_max
         self.kinematics = VehicleKinematics(
-            wheelbase=self.wheelbase, dt=0.1, v_min=v_min, v_max=self.v_max, delta_max=self.delta_max
+            wheelbase=self.wheelbase, dt=self.dt, v_min=v_min, v_max=self.v_max, delta_max=self.delta_max, a_max=self.a_max
         )
         self.mpc = MPCTracker(
-            horizon=self.horizon, dt=0.1, wheelbase=self.wheelbase, v_min=v_min, v_max=self.v_max, delta_max=self.delta_max
+            horizon=self.horizon, dt=self.dt, wheelbase=self.wheelbase, v_min=v_min, v_max=self.v_max, delta_max=self.delta_max
         )
 
         # 状态
@@ -166,143 +147,15 @@ class VisualizedPlanningWrapper(Env):
         self.prev_control = np.array([self.v_max / 2, 0.0])  # 初始控制量
         self.prev_distance = None
 
-        # 初始化时先对齐到CSV首尾，避免占位state=[0,0,...]在可视化中留下残影
-        self._bootstrap_robot_pose_from_csv_once()
-
         # 空间定义
         self.state_dim = 4 + self.lidar_points
         self.action_dim = 2  # [acceleration, steering]
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.state_dim,), np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, (self.action_dim,), np.float32)
 
-    def _bootstrap_robot_pose_from_csv_once(self):
-        """环境创建后立即将机器人/目标对齐到CSV首尾，避免(0,0)占位状态被绘制。"""
-        csv_path = self._load_global_path_from_csv()
-        if csv_path is None or len(csv_path) < 2:
-            return
-
-        self.global_path = csv_path
-        self.start_position = self.global_path[0, :2].copy()
-        self.goal_position = self.global_path[-1, :2].copy()
-
-        robot = self.viz_env.robot
-        start = self.global_path[0]
-        end = self.global_path[-1]
-
-        aligned_state = robot.state.copy()
-        aligned_state[0, 0] = float(start[0])
-        aligned_state[1, 0] = float(start[1])
-        aligned_state[2, 0] = float(start[2])
-        if aligned_state.shape[0] > 3:
-            aligned_state[3, 0] = 0.0
-
-        robot.set_state(aligned_state, init=True)
-        if robot.velocity is not None:
-            robot.set_velocity(np.zeros_like(robot.velocity), init=True)
-        robot.set_goal([float(end[0]), float(end[1]), float(end[2])], init=True)
-        self.viz_env.build_tree()
-
-    def _load_randomization_config(self, env_yaml: str):
-        if yaml is None:
-            return {}
-
-        env_path = Path(os.path.join(os.path.dirname(__file__), env_yaml))
-        if not env_path.exists():
-            return {}
-
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            gui_cfg = data.get("gui", {}) if isinstance(data, dict) else {}
-            cfg = gui_cfg.get("randomization", {}) if isinstance(gui_cfg, dict) else {}
-            return cfg if isinstance(cfg, dict) else {}
-        except Exception:
-            return {}
-
-    def _load_global_path_config(self, env_yaml: str):
-        if yaml is None:
-            return {}
-
-        env_path = Path(os.path.join(os.path.dirname(__file__), env_yaml))
-        if not env_path.exists():
-            return {}
-
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            gui_cfg = data.get("gui", {}) if isinstance(data, dict) else {}
-            cfg = gui_cfg.get("global_path", {}) if isinstance(gui_cfg, dict) else {}
-            return cfg if isinstance(cfg, dict) else {}
-        except Exception:
-            return {}
-
-    def _load_global_path_from_csv(self):
-        cfg = self._global_path_cfg or {}
-        csv_path = cfg.get("csv_path", "")
-        if not csv_path:
-            return None
-
-        csv_file = Path(str(csv_path))
-        if not csv_file.is_absolute():
-            csv_file = (Path(os.path.dirname(__file__)) / csv_file).resolve()
-
-        if not csv_file.exists():
-            return None
-
-        delimiter = str(cfg.get("delimiter", ","))
-        x_col = str(cfg.get("x_col", "x"))
-        y_col = str(cfg.get("y_col", "y"))
-        yaw_col = str(cfg.get("yaw_col", "yaw"))
-        speed_col = str(cfg.get("speed_col", "speed"))
-
-        try:
-            data = np.genfromtxt(
-                str(csv_file), delimiter=delimiter, names=True, dtype=None, encoding="utf-8"
-            )
-        except Exception:
-            return None
-
-        if data is None or getattr(data, "dtype", None) is None or data.dtype.names is None:
-            return None
-
-        if data.ndim == 0:
-            data = np.array([data], dtype=data.dtype)
-
-        names = set(data.dtype.names)
-        if x_col not in names or y_col not in names:
-            return None
-
-        x = np.asarray(data[x_col], dtype=float)
-        y = np.asarray(data[y_col], dtype=float)
-        if x.size < 2:
-            return None
-
-        if yaw_col in names:
-            yaw = np.asarray(data[yaw_col], dtype=float)
-        else:
-            dx = np.gradient(x)
-            dy = np.gradient(y)
-            yaw = np.arctan2(dy, dx)
-
-        if speed_col in names:
-            v = np.asarray(data[speed_col], dtype=float)
-        else:
-            v = np.ones_like(x) * self.target_velocity
-
-        n = min(x.size, y.size, yaw.size, v.size)
-        path = np.zeros((n, 4), dtype=float)
-        path[:, 0] = x[:n]
-        path[:, 1] = y[:n]
-        path[:, 2] = yaw[:n]
-        path[:, 3] = v[:n]
-        return path
-
     def reset(self, seed=None, options=None):
         if seed is not None:
             np.random.seed(seed)
-
-        if self.randomize_every_reset:
-            self._randomize_episode_layout()
 
         # 重置ir-sim环境
         self.viz_env.reset()
@@ -320,7 +173,6 @@ class VisualizedPlanningWrapper(Env):
 
         # 生成全局路径
         self._generate_global_path()
-        self._apply_csv_start_goal_if_needed()
 
         self.current_step = 0
         self.prev_control = np.array([self.v_max / 2, 0.0])  # 初始控制量
@@ -334,85 +186,9 @@ class VisualizedPlanningWrapper(Env):
         obs = self._get_observation()
         return obs, {}
 
-    def _is_collision_free_state(self, robot, candidate_state):
-        original_state = robot.state.copy()
-        robot.set_state(candidate_state, init=False)
-        collision = any(robot.check_collision(obj) for obj in self.viz_env.obstacle_list)
-        robot.set_state(original_state, init=False)
-        return not collision
-
-    def _sample_free_robot_state(self, robot, width, height):
-        x_low, x_high = self.random_margin, max(self.random_margin + 0.1, width - self.random_margin)
-        y_low, y_high = self.random_margin, max(self.random_margin + 0.1, height - self.random_margin)
-
-        for _ in range(self.max_randomization_attempts):
-            candidate = robot.state.copy()
-            candidate[0, 0] = np.random.uniform(x_low, x_high)
-            candidate[1, 0] = np.random.uniform(y_low, y_high)
-            candidate[2, 0] = np.random.uniform(-np.pi, np.pi)
-            if candidate.shape[0] > 3:
-                candidate[3, 0] = 0.0
-
-            if self._is_collision_free_state(robot, candidate):
-                return candidate
-
-        return None
-
-    def _sample_free_goal(self, robot, width, height):
-        x_low, x_high = self.random_margin, max(self.random_margin + 0.1, width - self.random_margin)
-        y_low, y_high = self.random_margin, max(self.random_margin + 0.1, height - self.random_margin)
-
-        for _ in range(self.max_randomization_attempts):
-            candidate = robot.state.copy()
-            candidate[0, 0] = np.random.uniform(x_low, x_high)
-            candidate[1, 0] = np.random.uniform(y_low, y_high)
-            candidate[2, 0] = np.random.uniform(-np.pi, np.pi)
-            if candidate.shape[0] > 3:
-                candidate[3, 0] = 0.0
-
-            if self._is_collision_free_state(robot, candidate):
-                return np.array([candidate[0, 0], candidate[1, 0], candidate[2, 0]], dtype=float)
-
-        return None
-
-    def _randomize_episode_layout(self):
-        robot = self.viz_env.robot
-        width = float(getattr(self.viz_env.world_param, "width", 37.0))
-        height = float(getattr(self.viz_env.world_param, "height", 20.0))
-
-        if self.randomize_obstacles and len(self._random_obstacle_ids) > 0:
-            low = [self.random_margin, self.random_margin, -np.pi]
-            high = [max(self.random_margin + 0.1, width - self.random_margin),
-                    max(self.random_margin + 0.1, height - self.random_margin),
-                    np.pi]
-            self.viz_env.random_obstacle_position(low, high, ids=self._random_obstacle_ids, non_overlapping=True)
-
-        selected_start = None
-        selected_goal = None
-        for _ in range(self.max_randomization_attempts):
-            start_state = self._sample_free_robot_state(robot, width, height)
-            goal = self._sample_free_goal(robot, width, height)
-            if start_state is None or goal is None:
-                continue
-
-            if np.linalg.norm(start_state[:2, 0] - goal[:2]) >= self.min_start_goal_distance:
-                selected_start = start_state
-                selected_goal = goal
-                break
-
-        if selected_start is None or selected_goal is None:
-            return
-
-        robot.set_state(selected_start, init=True)
-        if robot.velocity is not None:
-            robot.set_velocity(np.zeros_like(robot.velocity), init=True)
-        robot.set_goal(selected_goal.tolist(), init=True)
-        self.viz_env.build_tree()
-
     def step(self, action):
         # 将归一化动作转换为实际值
-        a_max = 3.0
-        acceleration = action[0] * a_max
+        acceleration = action[0] * self.a_max
         steering = action[1] * self.delta_max
 
         # 获取当前状态
@@ -478,38 +254,18 @@ class VisualizedPlanningWrapper(Env):
         return obs, reward, terminated, truncated, info
 
     def _generate_global_path(self):
-        """生成全局参考路径（仅支持CSV轨迹）"""
-        csv_path = self._load_global_path_from_csv()
-        if csv_path is None or len(csv_path) < 2:
-            raise ValueError(
-                "global_path CSV 无效。请在 env.yaml 的 gui.global_path.csv_path 指定有效CSV，且至少包含2个点。"
-            )
+        """生成全局参考路径"""
+        num_points = 100
+        t = np.linspace(0, 1, num_points)
 
-        self.global_path = csv_path
-        self.start_position = self.global_path[0, :2].copy()
-        self.goal_position = self.global_path[-1, :2].copy()
+        self.global_path = np.zeros((num_points, 4))
+        self.global_path[:, 0] = self.start_position[0] + t * (self.goal_position[0] - self.start_position[0])
+        self.global_path[:, 1] = self.start_position[1] + t * (self.goal_position[1] - self.start_position[1])
 
-    def _apply_csv_start_goal_if_needed(self):
-        """将车辆状态和目标点对齐到CSV轨迹首尾。"""
-        if self.global_path is None or len(self.global_path) < 2:
-            return
-
-        robot = self.viz_env.robot
-        start = self.global_path[0]
-        end = self.global_path[-1]
-
-        aligned_state = robot.state.copy()
-        aligned_state[0, 0] = float(start[0])
-        aligned_state[1, 0] = float(start[1])
-        aligned_state[2, 0] = float(start[2])
-        if aligned_state.shape[0] > 3:
-            aligned_state[3, 0] = 0.0
-
-        robot.set_state(aligned_state, init=True)
-        if robot.velocity is not None:
-            robot.set_velocity(np.zeros_like(robot.velocity), init=True)
-        robot.set_goal([float(end[0]), float(end[1]), float(end[2])], init=True)
-        self.viz_env.build_tree()
+        dx = self.goal_position[0] - self.start_position[0]
+        dy = self.goal_position[1] - self.start_position[1]
+        self.global_path[:, 2] = np.arctan2(dy, dx)
+        self.global_path[:, 3] = self.target_velocity
 
     def _draw_global_path(self):
         """绘制全局参考路径（蓝色虚线）和局部路径（红色实线）"""
@@ -577,10 +333,10 @@ class VisualizedPlanningWrapper(Env):
             lidar_normalized = np.ones(self.lidar_points)
 
         obs = np.concatenate([
-            [v / self.target_velocity],
+            [v / max(self.target_velocity, 0.1)],
             [delta_theta / np.pi],
             [np.clip(delta_y / 5.0, -1, 1)],
-            [np.clip(delta, -1, 1)],
+            [np.clip(delta / max(self.delta_max, 1e-6), -1, 1)],
             lidar_normalized
         ])
         return obs.astype(np.float32)
@@ -619,8 +375,8 @@ class VisualizedPlanningWrapper(Env):
         if lidar_scan is not None:
             ranges = lidar_scan.get("ranges", np.ones(self.lidar_points) * self.lidar_range_max)
             min_distance = np.min(ranges)
-            if min_distance < self.obstacle_min_distance:
-                obstacle_penalty = (self.obstacle_min_distance - min_distance) * 1.0
+            if min_distance < self.obstacle_penalty_distance:
+                obstacle_penalty = (self.obstacle_penalty_distance - min_distance) * 1.0
                 reward -= obstacle_penalty
             if min_distance < self.obstacle_danger_distance:
                 reward -= 2.0
@@ -659,10 +415,7 @@ class PlanningGymWrapper(Env):
     def __init__(self, env_yaml="env.yaml", forward_only=True):
         super().__init__()
         from planning_gym.env import PlanningEnv
-        self.env = PlanningEnv(
-            env_yaml=env_yaml,
-            render_mode=None,
-        )
+        self.env = PlanningEnv(env_yaml=env_yaml, render_mode=None, forward_only=forward_only)
         self.forward_only = forward_only
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.env.state_dim,), np.float32)
         self.action_space = spaces.Box(-1.0, 1.0, (self.env.action_dim,), np.float32)
