@@ -198,24 +198,6 @@ pip install tk  # 或 PyQt5
 
 ---
 
-## 快速开始
-
-```bash
-# 激活虚拟环境
-source .venv/bin/activate
-
-# 控制型训练
-MPLBACKEND=Agg python train_control.py --total-timesteps 100000
-
-# 规划型训练
-MPLBACKEND=Agg python train_planning.py --total-timesteps 100000
-
-# 带实时可视化训练
-python train_control.py --total-timesteps 100000 --visualize
-python train_planning.py --total-timesteps 100000 --visualize
-```
-
----
 
 ## 方法一：控制型 (control_gym)
 
@@ -228,21 +210,6 @@ python train_planning.py --total-timesteps 100000 --visualize
 | 0 | 线速度 | [-1, 1] | [0, 3] m/s | 只允许前进时 |
 | 1 | 转向角 | [-1, 1] | [-1, 1] rad | 左负右正 |
 
-### 训练命令
-
-```bash
-# 基础训练（默认只允许前进）
-python train_control.py --total-timesteps 1000000
-
-# 带实时可视化训练
-python train_control.py --total-timesteps 1000000 --visualize
-
-# 调整渲染速度
-python train_control.py --visualize --render-delay 0.02
-
-# 允许车辆后退
-python train_control.py --total-timesteps 1000000 --no-forward-only
-```
 
 ### 可视化显示内容
 
@@ -287,7 +254,7 @@ MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000
 MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --n-envs 4 --batch-size 256 --learning-starts 10000
 
 # 更多并行（CPU核数足够时）
-MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --n-envs 8 --batch-size 256 --buffer-size 1000000
+MPLBACKEND=Agg python train_planning.py --total-timesteps 500000 --n-envs 8 --batch-size 256 --buffer-size 1000000
 
 # 带实时可视化训练（单环境）
 python train_planning.py --total-timesteps 1000000 --visualize
@@ -398,9 +365,6 @@ MPLBACKEND=Agg python train_planning.py --total-timesteps 1000000 --no-forward-o
 ## 评估模型
 
 ```bash
-# 控制型评估
-python eval_control.py --model-path ./logs/control_ppo_xxx/final_model.zip --visualize
-
 # 规划型评估
 python eval_planning.py --model-path ./logs/planning_td3_xxx/final_model.zip --visualize
 ```

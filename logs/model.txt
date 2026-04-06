@@ -1,0 +1,3 @@
+# obstacle_penalty_distance: 5，obstacle_danger_distance: 4.7
+/data/lzq/model_train_backup/model_train/workspace/logs/planning_td3_20260402_130549 仿真效果不错避障
+
